@@ -1,0 +1,4 @@
+START_CHAR = '⏵'
+STOP_CHAR = '⏹'
+UNKNOWN_CHAR = '⊗'
+UNKNOWN_TAG = '⊤'
