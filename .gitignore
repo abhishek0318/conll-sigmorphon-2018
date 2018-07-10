@@ -1,3 +1,9 @@
+data/conll2018/
+lib/m2m-aligner/
+saved_models/*
+runs/*
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -14,7 +20,6 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
 lib64/
 parts/
 sdist/

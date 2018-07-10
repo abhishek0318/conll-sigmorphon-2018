@@ -1,90 +1,175 @@
-import argparse
 import os
-import pickle
+import time
 
-import numpy
 from sklearn.model_selection import train_test_split
+import torch
+import torch.optim as optim
+from torch.nn.utils import clip_grad_norm_
+from tensorboardX import SummaryWriter
+from tqdm import trange
 
-from model import MorphologicalInflector
 from constants import *
+import hierarchical_model as package
+from utils import add_dict, add_string_to_key, divide_dict, grouper, save_model, shuffle_together
 
-def load_training_data(file_name):
-    """Loads training data.
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+
+def train_and_evaluate(input_train, labels_train, input_val, labels_val, model, optimizer, loss_fn, epochs=1, batch_size=32, clip=None, writer=None, model_save_dir=None):
+    """
 
     Args:
-        file_name: path to file containing the data
+        input_train: list of tuples containing model input for training
+        labels_train: list of tuples containing labels corresponding to model input for training
+        input_val: list of tuples containing model input for validation
+        labels_val list of tuples containing labels corresponding to model input for validation
+        model: (torch.nn.Module) the neural network
+        optimizer: (torch.optim) optimizer for parameters of model
+        loss_fn: a function that takes batch_output and batch_labels and computes the loss for the batch
+        epochs: number of epochs to run
+        batch_size: maximum batch_size
+        clip: the value to which clip the norm of gradients to
+        writer: tensorboardX.SummaryWriter
+        model_save_dir: directory where to save the model
 
     Returns:
-        lemmas: list of lemma
-        tags: list of tags
-        inflected_forms: list of inflected form
+        Nothing
     """
 
-    with open(file_name) as file:
-        text = file.read()
+    t = trange(epochs)
+    for epoch_num in t:
+        # shuffle training data
+        input_train, labels_train = shuffle_together(input_train, labels_train)
 
-    lemmas = []
-    tags = []
-    inflected_forms = []
+        epoch_metrics = {}
+        for batch_input, batch_labels in zip(grouper(input_train, batch_size), grouper(labels_train, batch_size)):
+            batch_input = list(filter(lambda x: x is not None, batch_input))  # remove None objects introduced by grouper
+            batch_labels = list(filter(lambda x: x is not None, batch_labels))  # remove None objects introduced by grouper
 
-    for line in text.split('\n')[:-1]:
-        lemma, inflected_form, tag = line.split('\t')
-        lemmas.append(lemma)
-        inflected_forms.append(inflected_form)
-        tags.append(tag) 
+            batch_metrics = train(batch_input, batch_labels, model, optimizer, loss_fn, clip)
+            add_dict(epoch_metrics, batch_metrics)
 
-    return lemmas, tags, inflected_forms
+        val_metrics = test(input_val, labels_val, model, loss_fn, 32)
 
-def get_index_dictionaries(lemmas, tags, inflected_forms):
-    """Returns char2index, index2char, tag2index
+        epoch_metrics = divide_dict(epoch_metrics, len(input_train))
+        val_metrics = divide_dict(val_metrics, len(input_val))
+
+        if model_save_dir:
+            save_model(epoch_num, {'model': model.state_dict(), 'optimizer': optimizer.state_dict()}, model_save_dir)
+
+        metrics = {**add_string_to_key(epoch_metrics, 'train'), **add_string_to_key(val_metrics, 'val')}
+        if writer is not None:
+            for key, value in metrics.items():
+                writer.add_scalar(key, value, epoch_num)
+        t.set_postfix(metrics)
+
+
+def train(model_input, labels, model, optimizer, loss_fn, clip=None):
+    """Train the model on `num_steps` batches
+    Args:
+        model_input: list of tuples containing input to model
+        labels: list of tuples containing labels corresponding to model input for training
+        model: (torch.nn.Module) the neural network
+        optimizer: (torch.optim) optimizer for parameters of model
+        loss_fn: a function that takes batch_output and batch_labels and computes the loss for the batch
+        clip: the value to which clip the norm of gradients to
+
+    Returns:
+        loss_dict: dictionary containing metrics
+    """
+
+    # set model to training mode
+    model.train()
+
+    # compute model output and loss
+
+    model_out = model(*zip(*model_input), *zip(*labels))
+
+    loss, loss_dict = loss_fn(*model_out, *zip(*labels))
+
+    # clear previous gradients, compute gradients of all variables wrt loss
+    optimizer.zero_grad()
+    loss.backward()
+
+    # performs updates using calculated gradients
+    if clip:
+        clip_grad_norm_(model.parameters(), clip)
+    optimizer.step()
+
+    return loss_dict
+
+
+def test(model_input, labels, model, loss_fn=None, batch_size=32):
+    """
 
     Args:
-        lemmas: list of lemma
-        tags: list of tags
-        inflected_forms: list of inflected form
+        model_input: list of tuples containing input to model
+        labels: list of tuples containing labels corresponding to model input for training
+        model: (torch.nn.Module) the neural network
+        loss_fn: a function that takes batch_output and batch_labels and computes the loss for the batch
+        batch_size: maximum batch_size
 
-    Returns: 
-        char2index: a dictionary which maps character to index
-        index2char: a dictionary which maps indedx to character
-        tag2index: a ditionary which maps morphological tag to index 
+    Returns:
+        metrics: dict
     """
 
-    unique_chars = set(''.join(lemmas) + ''.join(inflected_forms))
-    unique_chars.update(START_CHAR, STOP_CHAR) # special start and end symbols
-    unique_chars.update(UNKNOWN_CHAR) # special charcter for unkown word
-    char2index = {}
-    index2char = {}
+    metrics = {}
+    for batch_input, batch_labels in zip(grouper(model_input, batch_size), grouper(labels, batch_size)):
+        batch_input = list(filter(lambda x: x is not None, batch_input))  # remove None objects introduced by grouper
+        batch_labels = list(filter(lambda x: x is not None, batch_labels))  # remove None objects introduced by grouper
 
-    for index, char in enumerate(unique_chars):
-        char2index[char] = index
-        index2char[index] = char
+        batch_metrics = test_batch(batch_input, batch_labels, model, loss_fn=loss_fn)
+        add_dict(metrics, batch_metrics)
 
-    unique_tags = set(';'.join(tags).split(';'))
-    unique_tags.update(UNKNOWN_TAG)
-    tag2index = {tag:index for index, tag in enumerate(unique_tags)}
+    return metrics
 
-    return char2index, index2char, tag2index
+
+def test_batch(model_input, labels, model, loss_fn=None):
+    """Test the model on `num_steps` batches.
+
+    Args:
+        model_input: list of tuples containing input to model
+        labels: list of tuples containing labels corresponding to model input
+        model: (torch.nn.Module) the neural network
+        loss_fn: a function that takes batch_output and batch_labels and computes the loss for the batch
+    """
+
+    # set model to evaluating mode
+    model.eval()
+
+    # compute model output and loss
+    model_out = model(*zip(*model_input))
+
+    if loss_fn:
+        loss, metrics = loss_fn(*model_out, *zip(*labels))
+        return metrics
+    else:
+        return {}
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Train model.')
-    parser.add_argument('training_data', help='Path to training file.')
-    parser.add_argument('--embedding_size', type=int, default=100, help='Embedding Size')
-    parser.add_argument('--hidden_size', type=int, default=100, help='Hidden Size')
-    parser.add_argument('--epochs', type=int, default=1, help='Epochs')
-    parser.add_argument('--learning_rate', type=float, default=0.1, help='Learning Rate')
-    args = parser.parse_args()
+    language = 'hindi'
+    dataset = 'high'
+    lr = 1e-3
+    embedding_size = 300
+    hidden_size = 100
+    clip = 5
+    experiment_name = "h_{}_{}_lr{}_em{}_hd_{}_clip{}_{}".format(language, dataset, lr, embedding_size, hidden_size, str(clip), int(time.time()))
 
-    lemmas, tags, inflected_forms = load_training_data(args.training_data)
-    char2index, index2char, tag2index = get_index_dictionaries(lemmas, tags, inflected_forms)
+    model_inputs, labels, vocab = package.data.load_data(os.path.join(TASK1_DATA_PATH, '{}-train-{}'.format(language, dataset)))
 
-    lemmas_train, lemmas_test, tags_train, tags_test, inflected_forms_train, inflected_forms_test = train_test_split(lemmas, tags, inflected_forms, train_size=0.8, test_size=0.2)
+    model_inputs_train, model_inputs_val, labels_train, labels_val = train_test_split(model_inputs, labels, test_size=0.2, random_state=42)
 
-    model = MorphologicalInflector(char2index, index2char, tag2index, embedding_size=args.embedding_size, hidden_size=args.hidden_size)
-    model.train(lemmas_train, tags_train, inflected_forms_train, epochs=args.epochs, learning_rate=args.learning_rate)
-   
-    # pickle.dump(model, 'model.pkl')
-    # model = pickle.load('model.pkl')
+    model = package.net.Model(vocab, embedding_size=embedding_size, hidden_size=hidden_size).to(device)
+    optimizer = optim.Adam(lr=lr, params=model.parameters())
+    loss_fn = package.loss.Criterion(vocab)
 
-    print("Correct\tPredicted")
-    for correct, predicted in zip(inflected_forms_test, model.generate(lemmas_test, tags_test)):
-        print("{}\t{}".format(correct, predicted))
+    writer = SummaryWriter('runs/' + experiment_name)
+    model_save_dir = os.path.join('./saved_models', experiment_name)
+    os.makedirs(model_save_dir)
+    model_save_dir = None
+    try:
+        train_and_evaluate(model_inputs_train, labels_train, model_inputs_val, labels_val, model, optimizer, loss_fn,
+                        epochs=30, batch_size=32, model_save_dir=model_save_dir, writer=writer, clip=clip)
+    except KeyboardInterrupt:
+        package.data.evaluate_on_dev(model, os.path.join(TASK1_DATA_PATH, '{}-dev'.format(language)))
