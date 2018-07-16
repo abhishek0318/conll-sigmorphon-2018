@@ -23,8 +23,9 @@ def one_one_alignment(srcs, tgts):
             tgt = [token.replace(' ', '*') for token in tgt]
             file.write(' '.join(src) + '\t' + ' '.join(tgt) + '\n')
 
-    subprocess.run([os.path.join(M2M_ALIGNER_PATH, 'm2m-aligner'), '--errorInFile', '--delY',  '--maxX', '1',
-                    '--maxY', '1', '-i', os.path.join(M2M_ALIGNER_PATH, 'input'), '-o', os.path.join(M2M_ALIGNER_PATH, 'output')])
+    with open(os.devnull, "w") as f:
+        subprocess.run([os.path.join(M2M_ALIGNER_PATH, 'm2m-aligner'), '--errorInFile', '--delY',  '--maxX', '1',
+                    '--maxY', '1', '-i', os.path.join(M2M_ALIGNER_PATH, 'input'), '-o', os.path.join(M2M_ALIGNER_PATH, 'output')], stdout=f)
 
     alignments = []
 
