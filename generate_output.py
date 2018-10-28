@@ -42,7 +42,7 @@ def generate_entry(model_name, hyperparameters, datasets=('low', 'medium', 'high
         with open(os.path.join(output_folder, 'hyperparameters'), 'w', encoding='utf8') as file:
             file.write(hyperparameters)
 
-    for language in tqdm(sorted(languages)[60:]):
+    for language in tqdm(sorted(languages)):
         for dataset in datasets:
             if resume and os.path.exists(os.path.join(output_folder, '{}-{}-out'.format(language, dataset))):
                 continue
