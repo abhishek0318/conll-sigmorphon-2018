@@ -42,7 +42,7 @@ class BahdanauAttention(nn.Module):
 
         e = self.W_h(h) + self.W_s(s.transpose(0, 1).expand(-1, max_src_len, -1)) + self.b_attn.expand(bsz, max_src_len, -1) # (bsz, max_src_len, hidden_size)
         e = F.tanh(e)  # (bsz, max_src_len, hidden_size)
-        e = self.v(e).squeeze()  # (bsz, max_src_len)
+        e = self.v(e).squeeze(2)  # (bsz, max_src_len)
         e.data.masked_fill_(mask, float('-inf'))  # (bsz, max_src_len)
         a = F.softmax(e, dim=1)  # (bsz, max_src_len)
 
@@ -77,8 +77,8 @@ class GenerationProbabilty(nn.Module):
         """
 
         bsz = h_star.shape[0]
-        p_gen = self.W_h_star(h_star) + self.W_s(s.squeeze()) + self.W_x(x) + self.b_attn.expand(bsz, -1)  # (bsz, 1)
-        p_gen = F.sigmoid(p_gen.squeeze())  # (bsz, )
+        p_gen = self.W_h_star(h_star) + self.W_s(s.squeeze(0)) + self.W_x(x) + self.b_attn.expand(bsz, -1)  # (bsz, 1)
+        p_gen = F.sigmoid(p_gen.squeeze(1))  # (bsz, )
 
         return p_gen
 
@@ -123,6 +123,8 @@ class Encoder(nn.Module):
         h, (h_n, c_n) = self.lstm(embeddings_packed)
         h, _ = pad_packed_sequence(h, batch_first=True, padding_value=self.vocab.padding_idx)
         h = torch.zeros_like(h).scatter_(0, sorted_idx.unsqueeze(1).unsqueeze(1).expand(-1, h.shape[1], h.shape[2]), h)  # Revert sorting
+        h_n = torch.zeros_like(h_n).scatter_(1, sorted_idx.unsqueeze(0).unsqueeze(2).expand(h_n.shape[0], -1, h_n.shape[2]), h_n)  # Revert sorting
+        c_n = torch.zeros_like(c_n).scatter_(1, sorted_idx.unsqueeze(0).unsqueeze(2).expand(c_n.shape[0], -1, c_n.shape[2]), c_n)  # Revert sorting
         h = self.dropout_output(h)
         h_n = (h_n[0, :, :] + h_n[1, :, :]).unsqueeze(0)  # (1, bsz, hidden_size)
         c_n = (c_n[0, :, :] + c_n[1, :, :]).unsqueeze(0)  # (1, bsz, hidden_size)
@@ -189,21 +191,23 @@ class Decoder(nn.Module):
             a = self.attention(h, s, mask)  # (bsz, max_lemma_len)
 
             # (bsz, 1, max_lemma_len) X (bsz, max_lemma_tag_len, 2*hidden_size) -> (bsz, 1, 2*hidden_size)
-            h_star = torch.bmm(a.unsqueeze(1), h).squeeze()   # (bsz, 2*hidden_size)
+            h_star = torch.bmm(a.unsqueeze(1), h).squeeze(1)   # (bsz, 2*hidden_size)
 
             _, (s, c) = self.lstm(torch.cat([x, h_star], dim=1).unsqueeze(1), (s, c))
 
-            p_vocab = F.softmax(self.generator(torch.cat([s.squeeze(), h_star], dim=1)), dim=1)  # (bsz, char_vocab_size)
+            p_vocab = F.softmax(self.generator(torch.cat([s.squeeze(0), h_star], dim=1)), dim=1)  # (bsz, char_vocab_size)
 
             if self.use_ptr_gen:
                 p_attn = torch.zeros(bsz, self.vocab.char_vocab_size+self.vocab.tag_vocab_size, device=device)  # (bsz, char_vocab_size)
                 p_attn.scatter_add_(1, input_indices, a)
+                p_attn = p_attn[:, :self.vocab.char_vocab_size]
+                p_attn = p_attn / p_attn.sum(dim=1).unsqueeze(1).expand(bsz, self.vocab.char_vocab_size) # Make sum to 1
 
                 p_gen = self.generation_probability(h_star, s, x)  # (bsz, )
 
                 # https://pytorch.org/docs/stable/notes/broadcasting.html#broadcasting-semantics
                 # (bsz, 1) * (bsz, 2*char_vocab_size) -> (bsz, 2*char_vocab_size)
-                p_w = p_gen.unsqueeze(1) * p_vocab + (1 - p_gen).unsqueeze(1) * p_attn[:, :self.vocab.char_vocab_size]  # (bsz, char_vocab_size)
+                p_w = p_gen.unsqueeze(1) * p_vocab + (1 - p_gen).unsqueeze(1) * p_attn  # (bsz, char_vocab_size)
             else:
                 p_w = p_vocab
 

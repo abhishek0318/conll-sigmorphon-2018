@@ -1,7 +1,8 @@
+"""Contains utility functions."""
+
 from itertools import zip_longest
 import os
 import random
-from shutil import copyfile
 
 import torch
 import Levenshtein
@@ -23,14 +24,14 @@ def divide_dict(src_dict, num):
 
 
 def save_model(epoch_num, state, model_save_dir, filename=None):
-    """Save PyTorch model with """
+    """Save PyTorch model."""
     if filename is None:
         filename = 'epoch-{}'.format(epoch_num)
     torch.save(state, os.path.join(model_save_dir, filename))
 
 
 def pad_lists(lists, pad_int, pad_len=None, dtype=torch.float, device=device):
-    """Pads lists in a list to make them of equal size"""
+    """Pad lists (in a list) to make them of equal size and return a tensor."""
 
     if pad_len is None:
         pad_len = max([len(lst) for lst in lists])
@@ -44,7 +45,7 @@ def pad_lists(lists, pad_int, pad_len=None, dtype=torch.float, device=device):
 
 
 def add_dict(dest, src):
-    """Add two dictionary together."""
+    """Add values of one dictionary to another."""
     for key in src.keys():
         if key in dest.keys():
             dest[key] += src[key]
@@ -58,12 +59,19 @@ def add_string_to_key(src_dict, string):
 
 
 def merge_lists(lists1, lists2):
-    """Add two list of lists."""
-
+    """Add two lists of lists."""
     merged_lists = []
     for list1, list2 in zip(lists1, lists2):
         merged_lists.append(list1 + list2)
     return merged_lists
+
+
+def mean(List):
+    """Calculate mean of a list, return 0 if empty."""
+    if len(List) != 0:
+        return sum(List)/len(List)
+    else:
+        return 0.0
 
 
 def grouper(iterable, n, fillvalue=None):
@@ -74,7 +82,7 @@ def grouper(iterable, n, fillvalue=None):
 
 
 def accuracy(predictions, targets):
-    """Returns fraction predictions and targets match."""
+    """Return fraction of matches between two lists sequentially."""
     correct_count = 0
     for prediction, target in zip(predictions, targets):
         if prediction == target:
@@ -83,7 +91,7 @@ def accuracy(predictions, targets):
 
 
 def average_distance(predictions, targets):
-    """Returns average Levenshtein distance between predictions and targets."""
+    """Return average Levenshtein distance between two lists containing strings."""
     total_distance = 0
     for prediction, target in zip(predictions, targets):
         total_distance += Levenshtein.distance(prediction, target)

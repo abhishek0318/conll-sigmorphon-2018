@@ -42,7 +42,7 @@ class BahdanauAttention(nn.Module):
 
         e = self.W_h(h) + self.W_s(s.transpose(0, 1).expand(-1, max_src_len, -1)) + self.b_attn.expand(bsz, max_src_len, -1) # (bsz, max_src_len, hidden_size)
         e = F.tanh(e)  # (bsz, max_src_len, hidden_size)
-        e = self.v(e).squeeze()  # (bsz, max_src_len)
+        e = self.v(e).squeeze(2)  # (bsz, max_src_len)
         e.data.masked_fill_(mask, float('-inf'))  # (bsz, max_src_len)
         a = F.softmax(e, dim=1)  # (bsz, max_src_len)
 
@@ -83,9 +83,9 @@ class HierarchicalAttention(nn.Module):
 
         bsz = h_l.shape[0]
 
-        e = self.W_h_l(h_l) + self.W_h_tg(h_tg) + self.W_s(s).squeeze() + self.b_attn.expand(bsz, -1)  # (bsz, hidden_size)
+        e = self.W_h_l(h_l) + self.W_h_tg(h_tg) + self.W_s(s).squeeze(0) + self.b_attn.expand(bsz, -1)  # (bsz, hidden_size)
         e = F.tanh(e)
-        e = self.v(e).squeeze()  # (bsz, )
+        e = self.v(e).squeeze(1)  # (bsz, )
         a = F.sigmoid(e)
 
         return a
@@ -120,8 +120,8 @@ class GenerationProbabilty(nn.Module):
         """
 
         bsz = h_star.shape[0]
-        p_gen = self.W_h_star(h_star) + self.W_s(s.squeeze()) + self.W_x(x) + self.b_attn.expand(bsz, -1)  # (bsz, 1)
-        p_gen = F.sigmoid(p_gen.squeeze())  # (bsz, )
+        p_gen = self.W_h_star(h_star) + self.W_s(s.squeeze(0)) + self.W_x(x) + self.b_attn.expand(bsz, -1)  # (bsz, 1)
+        p_gen = F.sigmoid(p_gen.squeeze(1))  # (bsz, )
 
         return p_gen
 
@@ -166,6 +166,8 @@ class Encoder(nn.Module):
         h, (h_n, c_n) = self.lstm(embeddings_packed)
         h, _ = pad_packed_sequence(h, batch_first=True, padding_value=self.vocab.padding_idx)
         h = torch.zeros_like(h).scatter_(0, sorted_idx.unsqueeze(1).unsqueeze(1).expand(-1, h.shape[1], h.shape[2]), h)  # Revert sorting
+        h_n = torch.zeros_like(h_n).scatter_(1, sorted_idx.unsqueeze(0).unsqueeze(2).expand(h_n.shape[0], -1, h_n.shape[2]), h_n)  # Revert sorting
+        c_n = torch.zeros_like(c_n).scatter_(1, sorted_idx.unsqueeze(0).unsqueeze(2).expand(c_n.shape[0], -1, c_n.shape[2]), c_n)  # Revert sorting
         h = self.dropout_output(h)
         h_n = (h_n[0, :, :] + h_n[1, :, :]).unsqueeze(0)  # (1, bsz, hidden_size)
         c_n = (c_n[0, :, :] + c_n[1, :, :]).unsqueeze(0)  # (1, bsz, hidden_size)
@@ -245,9 +247,9 @@ class Decoder(nn.Module):
             a_tg = self.tag_attention(h_tg, s, mask_tg)  # (bsz, max_tag_len)
 
             # (bsz, 1, max_lemma_len) X (bsz, max_lemma_len, 2*hidden_size) -> (bsz, 1, 2*hidden_size)
-            h_l_star = torch.bmm(a_l.unsqueeze(1), h_l).squeeze()   # (bsz, 2*hidden_size)
+            h_l_star = torch.bmm(a_l.unsqueeze(1), h_l).squeeze(1)   # (bsz, 2*hidden_size)
             # (bsz, 1, max_tag_len) X (bsz, max_tag_len, 2*hidden_size) -> (bsz, 1, 2*hidden_size)
-            h_tg_star = torch.bmm(a_tg.unsqueeze(1), h_tg).squeeze()  # (bsz, 2*hidden_size)
+            h_tg_star = torch.bmm(a_tg.unsqueeze(1), h_tg).squeeze(1)  # (bsz, 2*hidden_size)
 
             # combine two context vectors
             if self.use_hierarchical_attention:
@@ -261,7 +263,7 @@ class Decoder(nn.Module):
 
             _, (s, c) = self.lstm(torch.cat([x, h_c_star], dim=1).unsqueeze(1), (s, c))
 
-            p_vocab = F.softmax(self.generator(torch.cat([s.squeeze(), h_c_star], dim=1)), dim=1)  # (bsz, char_vocab_size)
+            p_vocab = F.softmax(self.generator(torch.cat([s.squeeze(0), h_c_star], dim=1)), dim=1)  # (bsz, char_vocab_size)
 
             if self.use_ptr_gen:
                 p_attn = torch.zeros(bsz, self.vocab.char_vocab_size, device=device)  # (bsz, char_vocab_size)

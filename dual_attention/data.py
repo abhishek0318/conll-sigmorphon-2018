@@ -5,7 +5,7 @@ import torch
 from sklearn.model_selection import train_test_split
 
 from constants import TASK1_DATA_PATH
-from data import read_dataset
+from data import read_dataset, read_covered_dataset
 from m2maligner import one_one_alignment
 from utils import accuracy, average_distance, grouper
 
@@ -127,6 +127,7 @@ def get_p_gens(srcs, tgts, alignments):
         p_gen.append(seq_p_gen)
     return p_gen
 
+
 def get_alignment(lemmas, inflected_forms, vocab):
     alignments = one_one_alignment([list(lemma) + [vocab.STOP_CHAR] for lemma in lemmas],
                                    [list(inflected_form) + [vocab.STOP_CHAR] for inflected_form in inflected_forms])
@@ -137,50 +138,57 @@ def get_alignment(lemmas, inflected_forms, vocab):
     return alignments
 
 
-def load_data(language, dataset, test_data='dev', test_size=0.2, random_state=42, increase_val_data=False):
+def load_data(language, dataset, test_data='dev', val_ratio=0.2, random_state=42, use_external_val_data=False):
     """Loads training data."""
 
-    train_data = os.path.join(TASK1_DATA_PATH, '{}-train-{}'.format(language, dataset))
-    lemmas, tags, inflected_forms = read_dataset(train_data)
-    data_size = len(lemmas)
+    train_dataset = os.path.join(TASK1_DATA_PATH, '{}-train-{}'.format(language, dataset))
+    lemmas, tags, inflected_forms = read_dataset(train_dataset)
+    train_data_size = len(lemmas)
 
-    test_ratio = test_size
-    if test_ratio * data_size > 1000:
-        test_ratio = 1000/data_size
-    lemmas_train, lemmas_val, tags_train, tags_val, inflected_forms_train, inflected_forms_val = train_test_split(lemmas, tags, inflected_forms, test_size=test_ratio, random_state=random_state)
+    if val_ratio*train_data_size > 1000:
+        val_ratio = 1000/train_data_size
+    val_dataset = None
+
+    if use_external_val_data:
+        dev_dataset = os.path.join(TASK1_DATA_PATH, '{}-dev'.format(language))
+        high_dataset = os.path.join(TASK1_DATA_PATH, '{}-train-high'.format(language))
+        medium_dataset = os.path.join(TASK1_DATA_PATH, '{}-train-medium'.format(language))
+        low_dataset = os.path.join(TASK1_DATA_PATH, '{}-train-low'.format(language))
+
+        if test_data != 'dev':
+            val_dataset = dev_dataset
+        elif os.path.exists(high_dataset) and train_dataset != high_dataset:
+            val_dataset = high_dataset
+        elif os.path.exists(medium_dataset) and train_dataset != medium_dataset:
+            val_dataset = medium_dataset
+        elif os.path.exists(low_dataset) and train_dataset != low_dataset:
+            val_dataset = low_dataset
+
+        if val_dataset is not None:
+            lemmas_val, tags_val, inflected_forms_val = read_dataset(val_dataset)
+
+    if val_dataset is not None and len(lemmas_val) >= val_ratio*train_data_size:
+        lemmas_train, tags_train, inflected_forms_train = lemmas, tags, inflected_forms
+
+        val_data = list(zip(lemmas_val, tags_val, inflected_forms_val))
+        random.seed(random_state)
+        val_data_size = int(min(max(val_ratio*train_data_size, 100), len(lemmas_val)))
+        val_data = random.sample(val_data, val_data_size)
+        lemmas_val, tags_val, inflected_forms_val = zip(*val_data)
+        lemmas_val, tags_val, inflected_forms_val = list(lemmas_val), list(tags_val), list(inflected_forms_val)
+    else:
+        lemmas_train, lemmas_val, tags_train, tags_val, inflected_forms_train, inflected_forms_val = train_test_split(
+            lemmas, tags, inflected_forms, test_size=val_ratio, random_state=random_state)
+
     train_data_size = len(lemmas_train)
     val_data_size = len(lemmas_val)
 
-    # If the train dataset is too small, use some other data as validation data.
-    if train_data_size < 100 and increase_val_data:
-        if test_data != 'dev':
-            val_data = os.path.join(TASK1_DATA_PATH, '{}-dev'.format(language))
-        elif os.path.exists(os.path.join(TASK1_DATA_PATH, '{}-train-high'.format(language))):
-            val_data = os.path.join(TASK1_DATA_PATH, '{}-train-high'.format(language))
-        elif os.path.exists(os.path.join(TASK1_DATA_PATH, '{}-train-medium'.format(language))):
-            val_data = os.path.join(TASK1_DATA_PATH, '{}-train-medium'.format(language))
-        else:
-            val_data = None
-
-        if val_data is not None:
-            lemmas_train += lemmas_val
-            tags_train += tags_val
-            inflected_forms_train += inflected_forms_val
-            train_data_size += val_data_size
-
-            lemmas_val, tags_val, inflected_forms_val = read_dataset(val_data)
-            data = list(zip(lemmas_val, tags_val, inflected_forms_val))
-            random.seed(random_state)
-            data = random.sample(data, 100)
-            lemmas_val, tags_val, inflected_forms_val = zip(*data)
-            lemmas_val, tags_val, inflected_forms_val = list(lemmas_val), list(tags_val), list(inflected_forms_val)
-            val_data_size = 100
-
     if test_data == 'dev':
         dev_data = os.path.join(TASK1_DATA_PATH, '{}-dev'.format(language))
-        lemmas_test, tags_test, inflected_forms_test = read_dataset(dev_data)
+        lemmas_test, tags_test, _ = read_dataset(dev_data)
     elif test_data == 'test':
-        raise NotImplemented
+        test_data = os.path.join(TASK1_DATA_PATH, '{}-covered-test'.format(language))
+        lemmas_test, tags_test = read_covered_dataset(test_data)
     else:
         lemmas_test, tags_test, inflected_forms_test = [], [], []
 
@@ -211,14 +219,13 @@ def evaluate_on_dev(model, filename, batch_size=32):
     """Prints predictions and metrics by model on development dataset."""
 
     lemmas, tags, inflected_forms = read_dataset(filename)
-    predictions = generate_predictions(model, lemmas, tags)
+    predictions = generate_predictions(model, lemmas, tags, batch_size)
 
-    result_text = ''
-    for lemma, tag, inflected_form, prediction in zip(lemmas, tags, inflected_forms, predictions):
-        if inflected_form != prediction:
-            result_text += '{}\t{}\t{}\t{}\n'.format(lemma, tag, inflected_form, prediction)
+    for prediction in predictions:
+        print(prediction)
 
-    return result_text, accuracy(predictions, inflected_forms), average_distance(predictions, inflected_forms)
+    print()
+    print("Accuracy: {}, Average Distance: {}".format(accuracy(predictions, inflected_forms), average_distance(predictions, inflected_forms)))
 
 
 def generate_predictions(model, lemmas, tags, batch_size=32):
